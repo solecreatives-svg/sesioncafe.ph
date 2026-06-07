@@ -5,6 +5,15 @@
 <title>Sesion Cafe — Coffee, Matcha, Ube &amp; More</title>
 <meta content="Coffee, non-coffee lattes, milk tea, fruit tea, lemon and snacks. Order online from Sesion Cafe." name="description">
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  window.SB_URL = "https://uhhcwablxazwobhdhcdh.supabase.co";
+  window.SB_KEY = "sb_publishable_HUSo10LhQws9yX4BH1-KIw_JsAW6Q_p";
+  window.SB_BUCKET = "menu-photos";
+  window.SB_MENU_ID = "sesion";
+  try { window.sb = window.supabase.createClient(window.SB_URL, window.SB_KEY); }
+  catch (e) { console.error("Supabase init failed", e); }
+</script>
 <link href="https://fonts.googleapis.com" rel="preconnect">
 <link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect">
 <link href="https://fonts.googleapis.com/css2?family=Bagel+Fat+One&amp;family=Plus+Jakarta+Sans:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet">
@@ -3182,10 +3191,15 @@ const DEFAULT_MENU = {
 const MENU_LS_KEY = 'sesion_menu_draft_v1';
 function _clone(o){ return JSON.parse(JSON.stringify(o)); }
 let MENU = _clone(DEFAULT_MENU);
-try {
-  const _saved = localStorage.getItem(MENU_LS_KEY);
-  if (_saved) MENU = JSON.parse(_saved);
-} catch (e) { /* ignore unreadable storage */ }
+// Source of truth is now Supabase. DEFAULT_MENU is just the offline fallback.
+async function loadMenuFromCloud() {
+  if (!window.sb) return;
+  try {
+    const { data, error } = await window.sb.from('menu').select('data').eq('id', window.SB_MENU_ID).maybeSingle();
+    if (error) { console.warn('menu load error', error); return; }
+    if (data && data.data) { MENU = data.data; renderMenu(); renderFeatured(); }
+  } catch (e) { console.warn('menu load failed', e); }
+}
 function saveMenuDraft() {
   try { localStorage.setItem(MENU_LS_KEY, JSON.stringify(MENU)); }
   catch (e) { try { showToast('Could not save — storage full'); } catch (_) {} }
@@ -4045,16 +4059,14 @@ $('#year').textContent = new Date().getFullYear();
 renderMenu();
 renderFeatured();
 renderCart();
+loadMenuFromCloud();
 
 // =====================================================================
 // ============== ADMIN PANEL (owner-only menu manager) ================
 // =====================================================================
-// Open it by visiting your site with #admin at the end of the URL
-// (e.g. https://yoursite.com/#admin), OR by tapping the year in the
-// footer 5 times. Change ADMIN_PIN below to your own secret code.
-// NOTE: this is a light lock to keep customers out, not bank-grade
-// security — anyone with the file can read the code.
-const ADMIN_PIN = "1234";
+// Open it with the ⚙️ Admin button (or by tapping the footer year 5×),
+// then log in with your Supabase email + password. Edits save straight
+// to Supabase and go live for all customers instantly.
 
 (function () {
   let built = false;
@@ -4124,65 +4136,82 @@ const ADMIN_PIN = "1234";
       </div>
       <div id="admin-scroll">
         <div id="admin-gate">
-          <p style="font-weight:800;font-size:18px;">Enter PIN</p>
-          <input id="admin-pin" type="password" inputmode="numeric" placeholder="••••" />
-          <div><button class="admin-btn" id="admin-unlock" type="button">Unlock</button></div>
-          <p id="admin-pin-err" style="color:var(--burst-red);font-weight:700;display:none;margin-top:8px;">Wrong PIN</p>
+          <p style="font-weight:800;font-size:18px;">Admin login</p>
+          <input id="admin-email" type="email" autocomplete="username" placeholder="email"
+            style="width:240px;letter-spacing:normal;text-align:left;" />
+          <input id="admin-pass" type="password" autocomplete="current-password" placeholder="password"
+            style="width:240px;letter-spacing:normal;text-align:left;" />
+          <div><button class="admin-btn" id="admin-unlock" type="button">Log in</button></div>
+          <p id="admin-pin-err" style="color:var(--burst-red);font-weight:700;display:none;margin-top:8px;">Wrong email or password</p>
         </div>
         <div id="admin-panel" style="display:none;">
           <div class="admin-note">
-            Edits here save on <b>this device</b> and update what you see instantly.
-            To make changes show for <b>all customers</b>, tap
-            <b>“Download updated website”</b> below and re-upload that file to your host
-            (it replaces the current index.html).
+            Make your changes below, then tap <b>“Save changes (go live)”</b> at the bottom.
+            Saving publishes instantly to <b>all customers</b> — no file upload needed.
           </div>
           <div id="admin-body"></div>
         </div>
       </div>
       <div id="admin-actions" style="display:none;">
-        <button class="admin-btn" id="admin-publish" type="button">⬇️ Download updated website</button>
-        <button class="admin-btn ghost" id="admin-backup" type="button">Backup (.json)</button>
-        <button class="admin-btn warn" id="admin-reset" type="button">Reset device edits</button>
+        <button class="admin-btn" id="admin-publish" type="button">💾 Save changes (go live)</button>
+        <button class="admin-btn ghost" id="admin-logout" type="button">Log out</button>
       </div>
     `;
     document.body.appendChild(o);
 
     document.getElementById('admin-close').addEventListener('click', closeAdmin);
     document.getElementById('admin-unlock').addEventListener('click', tryUnlock);
-    document.getElementById('admin-pin').addEventListener('keydown', e => { if (e.key === 'Enter') tryUnlock(); });
-    document.getElementById('admin-publish').addEventListener('click', publishSite);
-    document.getElementById('admin-backup').addEventListener('click', downloadBackup);
-    document.getElementById('admin-reset').addEventListener('click', resetDevice);
+    document.getElementById('admin-pass').addEventListener('keydown', e => { if (e.key === 'Enter') tryUnlock(); });
+    document.getElementById('admin-publish').addEventListener('click', publishToCloud);
+    document.getElementById('admin-logout').addEventListener('click', doLogout);
     built = true;
   }
 
-  function openAdmin() {
-    build();
-    document.getElementById('admin-overlay').style.display = 'flex';
+  function showPanel() {
+    cart = []; renderCart();
+    document.getElementById('admin-gate').style.display = 'none';
+    document.getElementById('admin-panel').style.display = 'block';
+    document.getElementById('admin-actions').style.display = 'flex';
+    renderAdminBody();
+  }
+  function showGate() {
     document.getElementById('admin-gate').style.display = 'block';
     document.getElementById('admin-panel').style.display = 'none';
     document.getElementById('admin-actions').style.display = 'none';
-    document.getElementById('admin-pin').value = '';
-    document.getElementById('admin-pin-err').style.display = 'none';
+    const e = document.getElementById('admin-pin-err'); if (e) e.style.display = 'none';
+    setTimeout(() => { const el = document.getElementById('admin-email'); if (el) el.focus(); }, 50);
+  }
+  async function openAdmin() {
+    build();
+    document.getElementById('admin-overlay').style.display = 'flex';
     lockBody();
-    setTimeout(() => document.getElementById('admin-pin').focus(), 50);
+    let session = null;
+    try { const { data } = await window.sb.auth.getSession(); session = data && data.session; } catch (e) {}
+    if (session) { showPanel(); } else { showGate(); }
   }
   function closeAdmin() {
     const o = document.getElementById('admin-overlay');
     if (o) o.style.display = 'none';
     unlockBody();
   }
-  function tryUnlock() {
-    if (document.getElementById('admin-pin').value === ADMIN_PIN) {
-      // Clear the live cart so item edits can't corrupt an in-progress order
-      cart = []; renderCart();
-      document.getElementById('admin-gate').style.display = 'none';
-      document.getElementById('admin-panel').style.display = 'block';
-      document.getElementById('admin-actions').style.display = 'flex';
-      renderAdminBody();
-    } else {
-      document.getElementById('admin-pin-err').style.display = 'block';
-    }
+  async function tryUnlock() {
+    const email = (document.getElementById('admin-email').value || '').trim();
+    const pass = document.getElementById('admin-pass').value || '';
+    const errEl = document.getElementById('admin-pin-err');
+    errEl.style.display = 'none';
+    if (!window.sb) { errEl.textContent = 'Still connecting — try again in a moment'; errEl.style.display = 'block'; return; }
+    const btn = document.getElementById('admin-unlock');
+    btn.disabled = true; btn.textContent = 'Logging in…';
+    try {
+      const { error } = await window.sb.auth.signInWithPassword({ email, password: pass });
+      if (error) { errEl.textContent = 'Wrong email or password'; errEl.style.display = 'block'; }
+      else { showPanel(); }
+    } catch (e) { errEl.textContent = 'Login failed'; errEl.style.display = 'block'; }
+    btn.disabled = false; btn.textContent = 'Log in';
+  }
+  async function doLogout() {
+    try { await window.sb.auth.signOut(); } catch (e) {}
+    closeAdmin();
   }
 
   // ---- live refresh + debounced save ----
@@ -4270,10 +4299,15 @@ const ADMIN_PIN = "1234";
       el.addEventListener('change', () => {
         const f = el.files && el.files[0];
         if (!f) return;
-        resizeToDataURL(f, 900, url => {
-          if (!url) { showToast('Could not read image'); return; }
-          MENU[el.dataset.cat].items[el.dataset.idx].imageUrl = url;
-          saveMenuDraft(); renderAdminBody(); refreshLive();
+        showToast('Uploading photo…');
+        resizeToBlob(f, 900, async blob => {
+          if (!blob) { showToast('Could not read image'); return; }
+          try {
+            const url = await uploadToStorage(blob);
+            MENU[el.dataset.cat].items[el.dataset.idx].imageUrl = url;
+            renderAdminBody(); refreshLive();
+            showToast('Photo added — tap Save to publish');
+          } catch (err) { console.error(err); showToast('Upload failed — are you logged in?'); }
         });
       });
     });
@@ -4304,8 +4338,8 @@ const ADMIN_PIN = "1234";
     });
   }
 
-  // ---- resize/compress uploaded photo to keep file small ----
-  function resizeToDataURL(file, maxW, cb) {
+  // ---- resize image to a compressed JPEG blob ----
+  function resizeToBlob(file, maxW, cb) {
     const reader = new FileReader();
     reader.onload = e => {
       const img = new Image();
@@ -4315,7 +4349,7 @@ const ADMIN_PIN = "1234";
         const c = document.createElement('canvas');
         c.width = w; c.height = h;
         c.getContext('2d').drawImage(img, 0, 0, w, h);
-        try { cb(c.toDataURL('image/jpeg', 0.82)); } catch (err) { cb(null); }
+        c.toBlob(b => cb(b), 'image/jpeg', 0.82);
       };
       img.onerror = () => cb(null);
       img.src = e.target.result;
@@ -4324,47 +4358,52 @@ const ADMIN_PIN = "1234";
     reader.readAsDataURL(file);
   }
 
-  // ---- publish: regenerate index.html with current menu baked in ----
-  async function publishSite() {
-    let html;
+  // ---- upload a blob to Supabase Storage, return its public URL ----
+  async function uploadToStorage(blob) {
+    const name = 'p_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8) + '.jpg';
+    const { error } = await window.sb.storage.from(window.SB_BUCKET)
+      .upload(name, blob, { contentType: 'image/jpeg', upsert: false });
+    if (error) throw error;
+    const { data } = window.sb.storage.from(window.SB_BUCKET).getPublicUrl(name);
+    return data.publicUrl;
+  }
+
+  function dataURLtoBlob(dataURL) {
     try {
-      const res = await fetch(window.location.href, { cache: 'no-store' });
-      html = await res.text();
+      const parts = dataURL.split(',');
+      const mime = (parts[0].match(/:(.*?);/) || [])[1] || 'image/jpeg';
+      const bin = atob(parts[1]); const len = bin.length; const arr = new Uint8Array(len);
+      for (let i = 0; i < len; i++) arr[i] = bin.charCodeAt(i);
+      return new Blob([arr], { type: mime });
+    } catch (e) { return null; }
+  }
+
+  // ---- SAVE: move any embedded photos to storage, then write menu to Supabase ----
+  async function publishToCloud() {
+    const btn = document.getElementById('admin-publish');
+    btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Saving…';
+    try {
+      let migrated = 0;
+      for (const cat of Object.values(MENU)) {
+        for (const it of (cat.items || [])) {
+          if (it.imageUrl && it.imageUrl.indexOf('data:image') === 0) {
+            btn.textContent = 'Uploading photos… ' + (++migrated);
+            const blob = dataURLtoBlob(it.imageUrl);
+            if (blob) { try { it.imageUrl = await uploadToStorage(blob); } catch (e) { console.warn('photo migrate failed', e); } }
+          }
+        }
+      }
+      btn.textContent = 'Saving…';
+      const { error } = await window.sb.from('menu')
+        .upsert({ id: window.SB_MENU_ID, data: MENU, updated_at: new Date().toISOString() });
+      if (error) throw error;
+      refreshLive();
+      showToast('Saved! Customers now see the latest.');
     } catch (e) {
-      html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+      console.error(e);
+      alert('Save failed: ' + (e.message || e) + '\n\nMake sure you are logged in, then try again.');
     }
-    const START = '/*__MENU_START__*/', END = '/*__MENU_END__*/';
-    const i = html.indexOf(START), j = html.indexOf(END);
-    if (i === -1 || j === -1) {
-      alert('Could not find the menu markers in the file. Use the .json backup instead and send it to your developer.');
-      return;
-    }
-    const block = START + '\nconst DEFAULT_MENU = ' + JSON.stringify(MENU, null, 2) + ';\n' + END;
-    let out = html.slice(0, i) + block + html.slice(j + END.length);
-    // Safety net: never let an open admin panel or locked scroll state get baked into the saved file.
-    out = out.replace(/<div id="admin-overlay"[\s\S]*?<\/div>\s*(?=<\/body>)/i, '');
-    out = out.replace(/<body[^>]*>/i, '<body>');
-    downloadFile(out, 'index.html', 'text/html');
-    showToast('Downloaded — now re-upload index.html to your host');
-  }
-
-  function downloadBackup() {
-    downloadFile(JSON.stringify({ menu: MENU }, null, 2), 'sesion-menu-backup.json', 'application/json');
-  }
-
-  function downloadFile(text, name, type) {
-    const blob = new Blob([text], { type });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = name; document.body.appendChild(a); a.click();
-    document.body.removeChild(a); URL.revokeObjectURL(url);
-  }
-
-  function resetDevice() {
-    if (confirm('Remove the edits saved on this device and go back to the published menu?')) {
-      try { localStorage.removeItem(MENU_LS_KEY); } catch (e) {}
-      location.reload();
-    }
+    btn.disabled = false; btn.textContent = orig;
   }
 
   // ---- how to open the admin ----
